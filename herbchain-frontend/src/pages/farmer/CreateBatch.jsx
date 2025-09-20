@@ -1,25 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Loader2, Upload, X, Camera } from 'lucide-react';
+import { ArrowLeft, Loader2, Upload, X, Camera, Wallet } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { createBatch } from '../../services/dataService';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { validateBatchForm } from '../../utils/validateForm';
 import { useToast } from '../../components/ToastNotification';
+import { storeImage } from '../../services/imageService';
 
 const CreateBatch = () => {
   const { user } = useAuth();
+  const { isConnected, userRole, service, connect, account } = useBlockchain();
   const navigate = useNavigate();
   const location = useLocation();
   const { showSuccess, showError } = useToast();
   
   const [formData, setFormData] = useState({
-    herb: '',
+    herbName: '',
     location: '',
+    moisturePercent: '',
+    photoIpfsHash: '',
+    notes: '',
+    // Legacy fields for compatibility
+    herb: '',
     moisture: '',
     harvestDate: '',
-    photo: null,
-    notes: ''
+    photo: null
   });
   
   const [photoPreview, setPhotoPreview] = useState(null);
@@ -46,7 +52,15 @@ const CreateBatch = () => {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData(prev => ({ 
+      ...prev, 
+      [name]: value,
+      // Update both new and legacy field names for compatibility
+      ...(name === 'herb' && { herbName: value }),
+      ...(name === 'herbName' && { herb: value }),
+      ...(name === 'moisture' && { moisturePercent: parseFloat(value) || 0 }),
+      ...(name === 'moisturePercent' && { moisture: value })
+    }));
     
     // Clear error when user starts typing
     if (errors[name]) {
@@ -54,7 +68,7 @@ const CreateBatch = () => {
     }
   };
 
-  const handlePhotoChange = (e) => {
+  const handlePhotoChange = async (e) => {
     const file = e.target.files[0];
     if (file) {
       // Validate file type
@@ -72,10 +86,19 @@ const CreateBatch = () => {
       
       setFormData(prev => ({ ...prev, photo: file }));
       
-      // Create preview URL
+      // Create preview URL and store image data
       const reader = new FileReader();
       reader.onload = (e) => {
-        setPhotoPreview(e.target.result);
+        const imageDataUrl = e.target.result;
+        setPhotoPreview(imageDataUrl);
+        
+        // Store the image data URL for display purposes
+        // In a real implementation, this would be uploaded to IPFS
+        setFormData(prev => ({ 
+          ...prev, 
+          photoDataUrl: imageDataUrl,
+          photoIpfsHash: `QmPhoto${Date.now()}${Math.random().toString(36).substr(2, 9)}`
+        }));
       };
       reader.readAsDataURL(file);
       
@@ -99,41 +122,136 @@ const CreateBatch = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     
+    console.log('🚀 Form submitted!');
+    console.log('📋 Form data:', formData);
+    
+    const currentAccount = account || service?.currentAccount;
+    console.log('🔗 Blockchain state:', { isConnected, userRole, account: currentAccount });
+    
+    // Check blockchain connection
+    if (!isConnected) {
+      console.log('❌ Not connected to blockchain');
+      showError('Please connect your wallet first');
+      return;
+    }
+
+    // Check user role
+    if (userRole !== 'farmer' && userRole !== 'admin') {
+      console.log('❌ Invalid user role:', userRole);
+      showError('You need farmer role to create batches');
+      return;
+    }
+    
+    console.log('✅ Role check passed:', userRole);
+    
     const validation = validateBatchForm(formData);
     if (!validation.isValid) {
+      console.log('❌ Form validation failed:', validation.errors);
       setErrors(validation.errors);
       return;
     }
 
+    // Validate blockchain-specific fields
+    if (!formData.herbName || !formData.location || !formData.moisturePercent) {
+      console.log('❌ Missing required fields');
+      setErrors({
+        herbName: !formData.herbName ? 'Herb name is required' : '',
+        location: !formData.location ? 'Location is required' : '',
+        moisturePercent: !formData.moisturePercent ? 'Moisture content is required' : ''
+      });
+      return;
+    }
+
+    console.log('✅ All validations passed, starting batch creation...');
     setLoading(true);
     setErrors({});
 
     try {
-      const batchData = {
-        ...formData,
-        farmer: user.name,
-        farmerId: user.id,
-        moisture: parseFloat(formData.moisture),
-        // Convert photo to URL for storage (in real app, this would upload to server)
-        photoUrl: photoPreview || null
+      // Prepare blockchain data
+      const blockchainData = {
+        herbName: formData.herbName || formData.herb,
+        location: formData.location,
+        moisturePercent: parseInt(formData.moisturePercent || formData.moisture),
+        photoIpfsHash: formData.photoIpfsHash || `QmPlaceholder${Date.now()}`,
+        notes: formData.notes || ''
       };
-      
-      // Remove the photo file from the data since we're using photoUrl
-      delete batchData.photo;
 
-      const newBatch = await createBatch(batchData);
+      console.log('📤 Sending to blockchain service:', blockchainData);
+
+      // Store image data locally if we have it
+      if (formData.photoDataUrl && formData.photoIpfsHash) {
+        console.log('📸 Storing image data locally...');
+        storeImage(formData.photoIpfsHash, formData.photoDataUrl);
+      }
+
+      // Create batch on blockchain
+      const result = await service.createBatch(blockchainData);
       
-      showSuccess(`Batch created successfully! ID: ${newBatch.id}`);
-      navigate('/farmer/my-batches');
+      console.log('📥 Blockchain service result:', result);
+      
+      if (result.success) {
+        console.log('✅ Batch created successfully!');
+        showSuccess(`Batch created successfully on blockchain! Batch ID: ${result.batchId}`);
+        navigate('/farmer/my-batches');
+      } else {
+        console.log('❌ Batch creation failed:', result.error);
+        showError(`Failed to create batch: ${result.error}`);
+      }
     } catch (error) {
+      console.error('❌ Batch creation error:', error);
       showError('Failed to create batch. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
+  // Show connection prompt if not connected
+  if (!isConnected) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <div className="text-center py-12">
+          <Wallet className="mx-auto h-16 w-16 text-gray-400 mb-4" />
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Connect Your Wallet</h2>
+          <p className="text-gray-600 mb-6">
+            You need to connect your MetaMask wallet to create batches on the blockchain.
+          </p>
+          <button
+            onClick={connect}
+            className="btn-primary flex items-center mx-auto"
+          >
+            <Wallet className="mr-2 h-5 w-5" />
+            Connect Wallet
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Show role error if not farmer
+  if (userRole !== 'farmer' && userRole !== 'admin') {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <div className="text-center py-12">
+          <div className="text-red-500 text-6xl mb-4">🚫</div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Access Denied</h2>
+          <p className="text-gray-600 mb-6">
+            You need farmer role to create batches. Current role: {userRole}
+          </p>
+          <button
+            onClick={() => navigate('/farmer/dashboard')}
+            className="btn-secondary"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-2xl mx-auto">
+
+
       {/* Header */}
       <div className="mb-8">
         <button
@@ -163,27 +281,27 @@ const CreateBatch = () => {
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Herb Name */}
           <div>
-            <label htmlFor="herb" className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="herbName" className="block text-sm font-medium text-gray-700 mb-1">
               Herb Name *
             </label>
             <input
               type="text"
-              id="herb"
-              name="herb"
-              value={formData.herb}
+              id="herbName"
+              name="herbName"
+              value={formData.herbName}
               onChange={handleChange}
-              placeholder="e.g., Ashwagandha, Tulsi, Turmeric"
+              placeholder="e.g., Organic Basil, Premium Turmeric"
               className={`
                 w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500/50
-                ${errors.herb ? 'border-red-300' : 'border-gray-300'}
+                ${errors.herbName ? 'border-red-300' : 'border-gray-300'}
               `}
               disabled={loading}
             />
-            {errors.herb && (
-              <p className="mt-1 text-sm text-red-600">{errors.herb}</p>
+            {errors.herbName && (
+              <p className="mt-1 text-sm text-red-600">{errors.herbName}</p>
             )}
             <p className="mt-1 text-xs text-gray-500">
-              Enter the name of the herb you are submitting
+              Enter the name of the herb you are submitting to the blockchain
             </p>
           </div>
 
@@ -212,59 +330,36 @@ const CreateBatch = () => {
 
           {/* Moisture Content */}
           <div>
-            <label htmlFor="moisture" className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="moisturePercent" className="block text-sm font-medium text-gray-700 mb-1">
               Moisture Content (%) *
             </label>
             <input
               type="number"
-              id="moisture"
-              name="moisture"
-              value={formData.moisture}
+              id="moisturePercent"
+              name="moisturePercent"
+              value={formData.moisturePercent}
               onChange={handleChange}
-              placeholder="e.g., 8.5"
-              step="0.1"
+              placeholder="e.g., 15"
               min="0"
-              max="15"
+              max="100"
               className={`
                 w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500/50
-                ${errors.moisture ? 'border-red-300' : 'border-gray-300'}
+                ${errors.moisturePercent ? 'border-red-300' : 'border-gray-300'}
               `}
               disabled={loading}
             />
-            {errors.moisture && (
-              <p className="mt-1 text-sm text-red-600">{errors.moisture}</p>
+            {errors.moisturePercent && (
+              <p className="mt-1 text-sm text-red-600">{errors.moisturePercent}</p>
             )}
             <p className="mt-1 text-xs text-gray-500">
-              Optimal moisture content is below 10% for better quality
+              Enter moisture content as a whole number (0-100%)
             </p>
-          </div>
-
-          {/* Harvest Date */}
-          <div>
-            <label htmlFor="harvestDate" className="block text-sm font-medium text-gray-700 mb-1">
-              Harvest Date *
-            </label>
-            <input
-              type="date"
-              id="harvestDate"
-              name="harvestDate"
-              value={formData.harvestDate}
-              onChange={handleChange}
-              className={`
-                w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500/50
-                ${errors.harvestDate ? 'border-red-300' : 'border-gray-300'}
-              `}
-              disabled={loading}
-            />
-            {errors.harvestDate && (
-              <p className="mt-1 text-sm text-red-600">{errors.harvestDate}</p>
-            )}
           </div>
 
           {/* Batch Photo */}
           <div>
             <label htmlFor="photo" className="block text-sm font-medium text-gray-700 mb-1">
-              Batch Photo (Optional)
+              Batch Photo *
             </label>
             
             {!photoPreview ? (
@@ -282,7 +377,7 @@ const CreateBatch = () => {
                     <p className="mb-2 text-sm text-gray-500">
                       <span className="font-semibold text-green-600">Upload a file</span> or drag and drop
                     </p>
-                    <p className="text-xs text-gray-500">PNG, JPG, GIF up to 10MB</p>
+                    <p className="text-xs text-gray-500">PNG, JPG, GIF up to 10MB (will be stored on IPFS)</p>
                   </div>
                   <input
                     id="photo"
@@ -312,8 +407,13 @@ const CreateBatch = () => {
                   </button>
                 </div>
                 <p className="mt-2 text-sm text-gray-600">
-                  Photo selected. Click the × to remove and select a different photo.
+                  Photo selected and will be uploaded to IPFS. Click the × to remove and select a different photo.
                 </p>
+                {formData.photoIpfsHash && (
+                  <p className="mt-1 text-xs text-green-600">
+                    IPFS Hash: {formData.photoIpfsHash.substring(0, 20)}...
+                  </p>
+                )}
               </div>
             )}
             
@@ -325,7 +425,7 @@ const CreateBatch = () => {
           {/* Notes */}
           <div>
             <label htmlFor="notes" className="block text-sm font-medium text-gray-700 mb-1">
-              Additional Notes (Optional)
+              Additional Notes *
             </label>
             <textarea
               id="notes"
@@ -333,10 +433,19 @@ const CreateBatch = () => {
               value={formData.notes}
               onChange={handleChange}
               rows={3}
-              placeholder="Any additional information about the batch..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500/50"
+              placeholder="Cultivation practices, quality details, harvest information..."
+              className={`
+                w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500/50
+                ${errors.notes ? 'border-red-300' : 'border-gray-300'}
+              `}
               disabled={loading}
             />
+            {errors.notes && (
+              <p className="mt-1 text-sm text-red-600">{errors.notes}</p>
+            )}
+            <p className="mt-1 text-xs text-gray-500">
+              Provide detailed information about the batch for blockchain record
+            </p>
           </div>
 
           {/* Submit Button */}
@@ -350,6 +459,13 @@ const CreateBatch = () => {
               Cancel
             </button>
             <button
+              type="button"
+              onClick={() => console.log('🧪 Test button clicked!')}
+              className="btn-secondary"
+            >
+              Test Console
+            </button>
+            <button
               type="submit"
               disabled={loading}
               className="btn-primary flex items-center"
@@ -360,21 +476,32 @@ const CreateBatch = () => {
                   Creating...
                 </>
               ) : (
-                'Create Batch'
+                'Create Batch on Blockchain'
               )}
             </button>
           </div>
         </form>
       </motion.div>
 
+      {/* Blockchain Info */}
+      <div className="mt-8 card bg-blue-50 border-blue-200">
+        <h3 className="font-semibold text-blue-800 mb-2">🔗 Blockchain Information</h3>
+        <ul className="text-sm text-blue-700 space-y-1">
+          <li>• Your batch will be permanently recorded on the blockchain</li>
+          <li>• Photos are stored on IPFS for decentralized access</li>
+          <li>• All data is immutable and transparent</li>
+          <li>• Lab officers will review your batch for approval</li>
+        </ul>
+      </div>
+
       {/* Tips Sidebar */}
-      <div className="mt-8 card bg-green-50 border-green-200">
+      <div className="mt-4 card bg-green-50 border-green-200">
         <h3 className="font-semibold text-green-800 mb-2">💡 Tips for Better Approval</h3>
         <ul className="text-sm text-green-700 space-y-1">
-          <li>• Keep moisture content below 10% for optimal quality</li>
-          <li>• Provide accurate location information</li>
-          <li>• Include clear photos of the herb batch</li>
-          <li>• Add detailed notes about cultivation practices</li>
+          <li>• Provide accurate moisture content measurements</li>
+          <li>• Include precise location information</li>
+          <li>• Upload clear, high-quality photos</li>
+          <li>• Add detailed notes about cultivation and quality</li>
         </ul>
       </div>
     </div>

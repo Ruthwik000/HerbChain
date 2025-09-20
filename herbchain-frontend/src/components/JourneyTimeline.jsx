@@ -69,6 +69,18 @@ const JourneyTimeline = ({ timeline, currentStatus }) => {
                 {stage.notes}
               </p>
             )}
+            
+            {stage.blockNumber && (
+              <p className="text-xs text-blue-600 mt-1 font-mono">
+                Block #{stage.blockNumber}
+              </p>
+            )}
+            
+            {stage.transactionHash && (
+              <p className="text-xs text-gray-400 mt-1 font-mono">
+                Tx: {stage.transactionHash.substring(0, 10)}...
+              </p>
+            )}
           </div>
         </div>
       ))}

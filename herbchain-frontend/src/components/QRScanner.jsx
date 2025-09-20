@@ -1,316 +1,335 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Camera, Upload, X, Loader2 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
-import { useToast } from './ToastNotification';
+import { 
+  Camera, 
+  Upload, 
+  X, 
+  AlertCircle,
+  CheckCircle,
+  Loader
+} from 'lucide-react';
+import jsQR from 'jsqr';
 
-const QRScanner = ({ isOpen, onClose }) => {
-  const [scanMode, setScanMode] = useState(null); // 'camera' or 'upload'
-  const [stream, setStream] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [error, setError] = useState('');
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const navigate = useNavigate();
-  const { showSuccess } = useToast();
-
-  // Mock QR code detection function
-  const detectQRCode = () => {
-    // In a real implementation, you would use a QR code detection library
-    // For demo purposes, we'll simulate QR code detection
-    const mockQRCodes = [
-      'ASH-2025-001',
-      'TUL-2025-002', 
-      'TUR-2025-003'
-    ];
+// Extract batch ID from QR code URL or data
+const extractBatchIdFromQRData = (qrData) => {
+  try {
+    console.log('🔍 QR Code data:', qrData);
     
-    // Simulate detection delay
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // Randomly return one of the mock QR codes or null
-        const detected = Math.random() > 0.3 ? mockQRCodes[Math.floor(Math.random() * mockQRCodes.length)] : null;
-        resolve(detected);
-      }, 1000);
-    });
+    // Check if it's a URL containing batchId parameter
+    if (qrData.includes('http') || qrData.includes('localhost')) {
+      const urlObj = new URL(qrData);
+      const batchId = urlObj.searchParams.get('batchId');
+      console.log('📊 Extracted batch ID from URL:', batchId);
+      return batchId;
+    }
+    
+    // Check if it's just a batch ID (number)
+    if (/^\d+$/.test(qrData.trim())) {
+      console.log('📊 Direct batch ID:', qrData.trim());
+      return qrData.trim();
+    }
+    
+    // Check if it contains batch ID pattern
+    const batchIdMatch = qrData.match(/batchId[=:](\d+)/i);
+    if (batchIdMatch) {
+      console.log('📊 Pattern matched batch ID:', batchIdMatch[1]);
+      return batchIdMatch[1];
+    }
+    
+    console.log('❌ Could not extract batch ID from:', qrData);
+    return null;
+  } catch (error) {
+    console.error('❌ Error extracting batch ID:', error);
+    return null;
+  }
+};
+
+const QRScanner = ({ isOpen, onClose, onScan }) => {
+  const [hasCamera, setHasCamera] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [error, setError] = useState('');
+  const [scanResult, setScanResult] = useState('');
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      checkCameraAvailability();
+    } else {
+      stopCamera();
+    }
+
+    return () => stopCamera();
+  }, [isOpen]);
+
+  const checkCameraAvailability = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      setHasCamera(videoDevices.length > 0);
+    } catch (err) {
+      console.error('Error checking camera availability:', err);
+      setHasCamera(false);
+    }
   };
 
   const startCamera = async () => {
     try {
       setError('');
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
+      setIsScanning(true);
+      
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: { 
-          facingMode: 'environment', // Use back camera on mobile
+          facingMode: 'environment', // Use back camera if available
           width: { ideal: 1280 },
           height: { ideal: 720 }
         }
       });
       
-      setStream(mediaStream);
-      setScanMode('camera');
-      
+      streamRef.current = stream;
       if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          startQRScanning();
+        };
       }
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      if (error.name === 'NotAllowedError') {
-        setError('Camera access denied. Please allow camera permissions and try again.');
-      } else if (error.name === 'NotFoundError') {
-        setError('No camera found on this device.');
-      } else {
-        setError('Unable to access camera. Please try uploading a photo instead.');
-      }
+    } catch (err) {
+      console.error('Error starting camera:', err);
+      setError('Unable to access camera. Please check permissions.');
+      setIsScanning(false);
     }
   };
 
   const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
-    setScanMode(null);
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+    setIsScanning(false);
   };
 
-  const scanFromCamera = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
+  const startQRScanning = () => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+    }
     
-    setScanning(true);
-    setError('');
-    
-    try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
-      
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0);
-      
-      const qrCode = await detectQRCode();
-      
-      if (qrCode) {
-        showSuccess(`QR Code detected: ${qrCode}`);
-        navigate(`/consumer/batch?batchId=${qrCode}`);
-        handleClose();
-      } else {
-        setError('No QR code detected. Please try again or ensure the QR code is clearly visible.');
+    scanIntervalRef.current = setInterval(() => {
+      if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+        scanQRCode();
       }
-    } catch (error) {
-      setError('Failed to scan QR code. Please try again.');
-    } finally {
-      setScanning(false);
+    }, 500); // Scan every 500ms
+  };
+
+  const scanQRCode = () => {
+    if (!videoRef.current) return;
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    
+    const qrCode = jsQR(imageData.data, imageData.width, imageData.height);
+    
+    if (qrCode) {
+      console.log('✅ QR Code detected:', qrCode.data);
+      const batchId = extractBatchIdFromQRData(qrCode.data);
+      
+      if (batchId) {
+        handleQRDetected(batchId);
+      } else {
+        setError('QR code does not contain a valid batch ID');
+      }
     }
   };
 
-  const handleFileUpload = async (event) => {
+  const handleQRDetected = (batchId) => {
+    stopCamera();
+    setScanResult(batchId);
+    setTimeout(() => {
+      onScan(batchId);
+      onClose();
+    }, 1500);
+  };
+
+  const handleFileUpload = (event) => {
     const file = event.target.files[0];
     if (!file) return;
-    
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      setError('Please select a valid image file.');
-      return;
-    }
-    
-    setScanning(true);
+
     setError('');
-    
-    try {
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
+    const reader = new FileReader();
+    reader.onload = (e) => {
       const img = new Image();
-      
-      img.onload = async () => {
+      img.onload = () => {
+        // Create canvas to process the image
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
         canvas.width = img.width;
         canvas.height = img.height;
-        context.drawImage(img, 0, 0);
-        
-        const qrCode = await detectQRCode();
+        ctx.drawImage(img, 0, 0);
+
+        // Get image data and scan for QR code
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const qrCode = jsQR(imageData.data, imageData.width, imageData.height);
         
         if (qrCode) {
-          showSuccess(`QR Code detected: ${qrCode}`);
-          navigate(`/consumer/batch?batchId=${qrCode}`);
-          handleClose();
+          console.log('✅ QR Code detected in uploaded image:', qrCode.data);
+          const batchId = extractBatchIdFromQRData(qrCode.data);
+          
+          if (batchId) {
+            handleQRDetected(batchId);
+          } else {
+            setError('QR code does not contain a valid batch ID');
+          }
         } else {
-          setError('No QR code detected in the image. Please try a different image.');
+          setError('No QR code found in the uploaded image');
         }
-        setScanning(false);
       };
-      
-      img.onerror = () => {
-        setError('Failed to load image. Please try a different file.');
-        setScanning(false);
-      };
-      
-      img.src = URL.createObjectURL(file);
-    } catch (error) {
-      setError('Failed to process image. Please try again.');
-      setScanning(false);
-    }
-  };
-
-  const handleClose = () => {
-    stopCamera();
-    setScanMode(null);
-    setError('');
-    setScanning(false);
-    onClose();
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      img.src = e.target.result;
     };
-  }, [stream]);
+    reader.readAsDataURL(file);
+  };
+
+  const captureFrame = () => {
+    if (!videoRef.current) return;
+    scanQRCode(); // Manually trigger a scan
+  };
 
   if (!isOpen) return null;
 
   return (
     <AnimatePresence>
-      <div className="fixed inset-0 z-50 overflow-y-auto">
-        <div className="flex min-h-screen items-center justify-center p-4">
-          {/* Backdrop */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black bg-opacity-75"
-            onClick={handleClose}
-          />
-          
-          {/* Modal */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            className="relative bg-white rounded-xl shadow-xl max-w-md w-full mx-4"
-          >
-            {/* Header */}
-            <div className="flex items-center justify-between p-6 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">
-                Scan QR Code
-              </h3>
-              <button
-                onClick={handleClose}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <X size={20} />
-              </button>
-            </div>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ scale: 0.9, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          exit={{ scale: 0.9, opacity: 0 }}
+          className="bg-white rounded-2xl p-6 w-full max-w-md"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-semibold text-gray-900">Scan QR Code</h2>
+            <button
+              onClick={onClose}
+              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+            >
+              <X size={20} className="text-gray-500" />
+            </button>
+          </div>
 
-            {/* Content */}
-            <div className="p-6">
-              {!scanMode ? (
-                /* Mode Selection */
-                <div className="space-y-4">
-                  <p className="text-gray-600 text-center mb-6">
-                    Choose how you want to scan the QR code
-                  </p>
-                  
-                  <button
-                    onClick={startCamera}
-                    className="w-full flex items-center justify-center p-4 border-2 border-dashed border-gray-300 rounded-lg hover:border-green-500 hover:bg-green-50 transition-colors"
-                  >
-                    <Camera className="w-8 h-8 text-green-600 mr-3" />
-                    <div className="text-left">
-                      <div className="font-medium text-gray-900">Use Camera</div>
-                      <div className="text-sm text-gray-500">Scan QR code with camera</div>
-                    </div>
-                  </button>
-                  
-                  <div className="relative">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFileUpload}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                      disabled={scanning}
-                    />
-                    <div className="w-full flex items-center justify-center p-4 border-2 border-dashed border-gray-300 rounded-lg hover:border-green-500 hover:bg-green-50 transition-colors cursor-pointer">
-                      <Upload className="w-8 h-8 text-green-600 mr-3" />
-                      <div className="text-left">
-                        <div className="font-medium text-gray-900">Upload Photo</div>
-                        <div className="text-sm text-gray-500">Select image with QR code</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : scanMode === 'camera' ? (
-                /* Camera View */
-                <div className="space-y-4">
-                  <div className="relative">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      className="w-full h-64 bg-black rounded-lg object-cover"
-                    />
-                    
-                    {/* Scanning overlay */}
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="w-48 h-48 border-2 border-green-500 rounded-lg">
-                        <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-green-500"></div>
-                        <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-green-500"></div>
-                        <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-green-500"></div>
-                        <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-green-500"></div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex space-x-3">
-                    <button
-                      onClick={stopCamera}
-                      className="flex-1 btn-secondary"
-                      disabled={scanning}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={scanFromCamera}
-                      disabled={scanning}
-                      className="flex-1 btn-primary flex items-center justify-center"
-                    >
-                      {scanning ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Scanning...
-                        </>
-                      ) : (
-                        'Scan QR Code'
-                      )}
-                    </button>
-                  </div>
-                  
-                  <p className="text-xs text-gray-500 text-center">
-                    Position the QR code within the frame and tap scan
-                  </p>
-                </div>
-              ) : null}
-              
-              {/* Error Message */}
-              {error && (
-                <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-                  <p className="text-sm text-red-600">{error}</p>
-                </div>
-              )}
-              
-              {/* Loading State for Upload */}
-              {scanning && scanMode !== 'camera' && (
-                <div className="mt-4 flex items-center justify-center p-4">
-                  <Loader2 className="mr-2 h-6 w-6 animate-spin text-green-500" />
-                  <span className="text-gray-600">Processing image...</span>
-                </div>
-              )}
+          {/* Success State */}
+          {scanResult && (
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="text-center py-8"
+            >
+              <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">QR Code Detected!</h3>
+              <p className="text-gray-600 mb-4">Batch ID: {scanResult}</p>
+              <div className="flex items-center justify-center">
+                <Loader className="w-5 h-5 text-blue-500 animate-spin mr-2" />
+                <span className="text-blue-600">Loading batch details...</span>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Error State */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+              <div className="flex items-center">
+                <AlertCircle className="w-5 h-5 text-red-500 mr-2" />
+                <p className="text-red-700 text-sm">{error}</p>
+              </div>
             </div>
-            
-            {/* Hidden canvas for image processing */}
-            <canvas ref={canvasRef} className="hidden" />
-          </motion.div>
-        </div>
-      </div>
+          )}
+
+          {/* Scanner Interface */}
+          {!scanResult && (
+            <div className="space-y-4">
+              {/* Camera View */}
+              {isScanning && (
+                <div className="relative">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    className="w-full h-64 bg-gray-900 rounded-lg object-cover"
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-48 h-48 border-2 border-white rounded-lg opacity-50">
+                      <div className="absolute inset-0 border-2 border-green-400 rounded-lg animate-pulse"></div>
+                    </div>
+                  </div>
+                  <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-50 text-white px-3 py-1 rounded-full text-sm">
+                    Scanning for QR codes...
+                  </div>
+                </div>
+              )}
+
+              {/* Camera Controls */}
+              {hasCamera && !isScanning && (
+                <button
+                  onClick={startCamera}
+                  className="w-full flex items-center justify-center px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
+                >
+                  <Camera size={20} className="mr-2" />
+                  Start Camera
+                </button>
+              )}
+
+              {isScanning && (
+                <button
+                  onClick={stopCamera}
+                  className="w-full flex items-center justify-center px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
+                >
+                  Stop Camera
+                </button>
+              )}
+
+              {/* File Upload */}
+              <div className="relative">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full flex items-center justify-center px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium rounded-lg transition-colors"
+                >
+                  <Upload size={20} className="mr-2" />
+                  Upload QR Image
+                </button>
+              </div>
+
+              {/* Instructions */}
+              <div className="text-center text-sm text-gray-500 space-y-1">
+                <p>Position the QR code within the frame for automatic detection</p>
+                <p>or upload an image containing the QR code</p>
+                <p className="text-xs text-gray-400">QR code should contain batch ID or verification URL</p>
+              </div>
+            </div>
+          )}
+        </motion.div>
+      </motion.div>
     </AnimatePresence>
   );
 };

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Search, Filter, Beaker, Clock, CheckCircle, XCircle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { getBatchesByRole, approveBatch, rejectBatch } from '../../services/dataService';
 import { useToast } from '../../components/ToastNotification';
 import BatchReviewCard from '../../components/BatchReviewCard';
@@ -9,6 +10,7 @@ import ApproveRejectModal from '../../components/ApproveRejectModal';
 
 const LabDashboard = () => {
   const { user } = useAuth();
+  const { isConnected, service, account } = useBlockchain();
   const { showSuccess, showError } = useToast();
   
   const [batches, setBatches] = useState([]);
@@ -28,7 +30,7 @@ const LabDashboard = () => {
 
   useEffect(() => {
     loadBatches();
-  }, []);
+  }, [isConnected, service, account]);
 
   useEffect(() => {
     filterBatches();
@@ -36,10 +38,97 @@ const LabDashboard = () => {
 
   const loadBatches = async () => {
     try {
-      const batchesData = await getBatchesByRole('Lab', user.id);
+      console.log('🧪 Loading lab batches...');
+      console.log('  - isConnected:', isConnected);
+      console.log('  - account:', account);
+      
+      let batchesData = [];
+      
+      if (isConnected && service) {
+        console.log('📡 Fetching batches from blockchain...');
+        
+        // Get all batches that lab officers need to see
+        console.log('📡 Fetching all batches for lab view...');
+        
+        const allBatchIds = new Set(); // Use Set to avoid duplicates
+        
+        // Get pending batches
+        try {
+          const pendingResult = await service.getPendingBatches();
+          console.log('📥 Pending batches result:', pendingResult);
+          if (pendingResult.success) {
+            pendingResult.batches.forEach(batch => {
+              allBatchIds.add(batch.id);
+              batchesData.push(batch);
+            });
+          }
+        } catch (error) {
+          console.log('⚠️ Could not fetch pending batches:', error.message);
+        }
+        
+        // Get approved batches
+        try {
+          const approvedResult = await service.getApprovedBatches();
+          console.log('📥 Approved batches result:', approvedResult);
+          if (approvedResult.success) {
+            approvedResult.batches.forEach(batch => {
+              if (!allBatchIds.has(batch.id)) {
+                allBatchIds.add(batch.id);
+                batchesData.push(batch);
+              }
+            });
+          }
+        } catch (error) {
+          console.log('⚠️ Could not fetch approved batches:', error.message);
+        }
+        
+        // Get total batches and try to fetch any missing ones (including rejected)
+        try {
+          const totalBatchesResult = await service.getTotalBatches();
+          console.log('📊 Total batches result:', totalBatchesResult);
+          
+          if (totalBatchesResult.success && totalBatchesResult.total > 0) {
+            // Check if we have all batches, if not fetch missing ones
+            for (let i = 0; i < totalBatchesResult.total; i++) {
+              if (!allBatchIds.has(i)) {
+                try {
+                  const batchResult = await service.getBatch(i);
+                  if (batchResult.success) {
+                    batchesData.push(batchResult.data);
+                    allBatchIds.add(i);
+                  }
+                } catch (error) {
+                  console.log(`⚠️ Could not fetch batch ${i}:`, error.message);
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.log('⚠️ Could not get total batches:', error.message);
+        }
+        
+        console.log('✅ All batches loaded from blockchain:', batchesData);
+        
+        if (batchesData.length === 0) {
+          console.log('📁 No blockchain batches found, falling back to local storage');
+          batchesData = await getBatchesByRole('Lab', user.id);
+        }
+      } else {
+        console.log('📁 Loading from local storage (not connected to blockchain)');
+        batchesData = await getBatchesByRole('Lab', user.id);
+      }
+      
       setBatches(batchesData);
     } catch (error) {
-      showError('Failed to load batches');
+      console.error('❌ Error loading lab batches:', error);
+      // Fallback to local storage on error
+      try {
+        const batchesData = await getBatchesByRole('Lab', user.id);
+        setBatches(batchesData);
+      } catch (fallbackError) {
+        console.error('❌ Fallback also failed:', fallbackError);
+        showError('Failed to load batches');
+      }
     } finally {
       setLoading(false);
     }
@@ -50,26 +139,39 @@ const LabDashboard = () => {
 
     // Filter by search term
     if (searchTerm) {
-      filtered = filtered.filter(batch =>
-        batch.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        batch.herb.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        batch.farmer.toLowerCase().includes(searchTerm.toLowerCase())
-      );
+      filtered = filtered.filter(batch => {
+        const batchId = batch.id?.toString() || '';
+        const herbName = batch.herbName || batch.herb || '';
+        const farmerAddress = batch.farmer || '';
+        
+        return batchId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+               herbName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+               farmerAddress.toLowerCase().includes(searchTerm.toLowerCase());
+      });
     }
 
     // Filter by status
     if (statusFilter !== 'All') {
       if (statusFilter === 'Approved') {
         // Show both approved and processed batches when "Approved" is selected
-        filtered = filtered.filter(batch => batch.status === 'Approved' || batch.status === 'Processed');
+        filtered = filtered.filter(batch => {
+          const status = batch.status || 'Pending';
+          return status === 'Approved' || status === 'Processed';
+        });
       } else {
-        filtered = filtered.filter(batch => batch.status === statusFilter);
+        filtered = filtered.filter(batch => {
+          const status = batch.status || 'Pending';
+          return status === statusFilter;
+        });
       }
     }
 
     // Filter by herb
     if (herbFilter !== 'All') {
-      filtered = filtered.filter(batch => batch.herb === herbFilter);
+      filtered = filtered.filter(batch => {
+        const herbName = batch.herbName || batch.herb;
+        return herbName === herbFilter;
+      });
     }
 
     setFilteredBatches(filtered);
@@ -97,24 +199,49 @@ const LabDashboard = () => {
     setActionLoading(true);
     
     try {
-      let updatedBatch;
+      console.log(`🧪 ${modalState.action}ing batch ${batchId}...`);
       
-      if (modalState.action === 'approve') {
-        updatedBatch = await approveBatch(batchId, user.name);
-        showSuccess(`Batch ${batchId} approved successfully`);
+      let result;
+      
+      if (isConnected && service) {
+        // Use blockchain service
+        if (modalState.action === 'approve') {
+          result = await service.approveBatch(batchId);
+          console.log('📥 Approve result:', result);
+        } else {
+          result = await service.rejectBatch(batchId, reason);
+          console.log('📥 Reject result:', result);
+        }
+        
+        if (result.success) {
+          showSuccess(`Batch ${batchId} ${modalState.action}d successfully on blockchain`);
+          // Reload batches to get updated data
+          console.log('🔄 Reloading batches after action...');
+          await loadBatches();
+        } else {
+          throw new Error(result.error);
+        }
       } else {
-        updatedBatch = await rejectBatch(batchId, reason, user.name);
-        showSuccess(`Batch ${batchId} rejected`);
+        // Fallback to local storage
+        let updatedBatch;
+        if (modalState.action === 'approve') {
+          updatedBatch = await approveBatch(batchId, user.name);
+        } else {
+          updatedBatch = await rejectBatch(batchId, reason, user.name);
+        }
+        
+        // Update local state
+        setBatches(prev => prev.map(batch => 
+          batch.id === batchId ? updatedBatch : batch
+        ));
+        
+        showSuccess(`Batch ${batchId} ${modalState.action}d successfully`);
       }
-      
-      // Update local state
-      setBatches(prev => prev.map(batch => 
-        batch.id === batchId ? updatedBatch : batch
-      ));
       
       setModalState({ isOpen: false, batch: null, action: null });
     } catch (error) {
-      showError(`Failed to ${modalState.action} batch`);
+      console.error(`❌ Failed to ${modalState.action} batch:`, error);
+      showError(`Failed to ${modalState.action} batch: ${error.message}`);
     } finally {
       setActionLoading(false);
     }
@@ -125,14 +252,17 @@ const LabDashboard = () => {
   };
 
   // Get unique herbs for filter
-  const uniqueHerbs = [...new Set(batches.map(batch => batch.herb))];
+  const uniqueHerbs = [...new Set(batches.map(batch => batch.herbName || batch.herb).filter(Boolean))];
   
   // Calculate stats
   const stats = {
     total: batches.length,
-    pending: batches.filter(b => b.status === 'Pending').length,
-    approved: batches.filter(b => b.status === 'Approved' || b.status === 'Processed').length,
-    rejected: batches.filter(b => b.status === 'Rejected').length
+    pending: batches.filter(b => (b.status || 'Pending') === 'Pending').length,
+    approved: batches.filter(b => {
+      const status = b.status || 'Pending';
+      return status === 'Approved' || status === 'Processed';
+    }).length,
+    rejected: batches.filter(b => (b.status || 'Pending') === 'Rejected').length
   };
 
   if (loading) {
@@ -146,13 +276,23 @@ const LabDashboard = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900 flex items-center">
-          Welcome, Lab Officer <span className="ml-2">🧪</span>
-        </h1>
-        <p className="mt-2 text-gray-600">
-          Review and approve herb batches for quality assurance
-        </p>
+      <div className="flex justify-between items-start">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center">
+            Welcome, Lab Officer <span className="ml-2">🧪</span>
+          </h1>
+          <p className="mt-2 text-gray-600">
+            Review and approve herb batches for quality assurance
+            {isConnected && <span className="text-green-600"> • Connected to Blockchain</span>}
+          </p>
+        </div>
+        <button
+          onClick={loadBatches}
+          disabled={loading}
+          className="btn-secondary flex items-center"
+        >
+          🔄 Refresh Data
+        </button>
       </div>
 
       {/* Stats */}

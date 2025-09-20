@@ -15,17 +15,22 @@ import {
 } from 'lucide-react';
 import { getBatchById, markAsProcessed } from '../../services/dataService';
 import { useAuth } from '../../context/AuthContext';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { useToast } from '../../components/ToastNotification';
 import StatusBadge from '../../components/StatusBadge';
 import JourneyTimeline from '../../components/JourneyTimeline';
 import MapView from '../../components/MapView';
 import QRCodeModal from '../../components/QRCodeModal';
 import { formatDate, formatDateTime } from '../../utils/formatDate';
+import { getImage, getAllImageHashes, getImageFromIPFS } from '../../services/imageService';
+import { debugImageStorage, checkImageHash } from '../../utils/imageDebug';
+import { relinkImages } from '../../utils/imageRelink';
 
 const BatchDetails = () => {
   const { batchId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isConnected, service, account } = useBlockchain();
   const { showSuccess, showError } = useToast();
   
   const [batch, setBatch] = useState(null);
@@ -33,6 +38,7 @@ const BatchDetails = () => {
   const [actionLoading, setActionLoading] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [processingNotes, setProcessingNotes] = useState('');
+  const [timeline, setTimeline] = useState([]);
   
   // QR Modal state
   const [qrModal, setQrModal] = useState({
@@ -42,7 +48,30 @@ const BatchDetails = () => {
   useEffect(() => {
     const loadBatch = async () => {
       try {
-        const batchData = await getBatchById(batchId);
+        console.log('🏭 Loading manufacturer batch details for ID:', batchId);
+        console.log('  - isConnected:', isConnected);
+        console.log('  - account:', account);
+        
+        let batchData = null;
+        
+        if (isConnected && service) {
+          console.log('📡 Fetching batch from blockchain...');
+          // Try to get batch from blockchain first
+          const result = await service.getBatch(parseInt(batchId));
+          console.log('📥 Blockchain result:', result);
+          
+          if (result.success) {
+            batchData = result.data;
+            console.log('✅ Batch loaded from blockchain:', batchData);
+          }
+        }
+        
+        // Fallback to local storage if blockchain fails
+        if (!batchData) {
+          console.log('📁 Falling back to local storage...');
+          batchData = await getBatchById(batchId);
+        }
+        
         if (!batchData) {
           showError('Batch not found');
           navigate('/manufacturer/dashboard');
@@ -51,7 +80,23 @@ const BatchDetails = () => {
         
         setBatch(batchData);
         setProcessingNotes(`Processed by ${user.name} on ${new Date().toLocaleDateString()}`);
+        
+        // Fetch timeline from blockchain if connected
+        if (isConnected && service) {
+          console.log('📅 Fetching timeline from blockchain...');
+          const timelineResult = await service.getBatchTimeline(parseInt(batchId));
+          if (timelineResult.success) {
+            setTimeline(timelineResult.timeline);
+            console.log('✅ Timeline loaded from blockchain:', timelineResult.timeline);
+          } else {
+            console.log('❌ Failed to load timeline from blockchain');
+            setTimeline(batchData.timeline || []);
+          }
+        } else {
+          setTimeline(batchData.timeline || []);
+        }
       } catch (error) {
+        console.error('❌ Error loading manufacturer batch details:', error);
         showError('Failed to load batch details');
         navigate('/manufacturer/dashboard');
       } finally {
@@ -62,15 +107,39 @@ const BatchDetails = () => {
     if (batchId) {
       loadBatch();
     }
-  }, [batchId, navigate, showError, user.name]);
+  }, [batchId, navigate, showError, user.name, isConnected, service, account]);
 
   const handleMarkProcessed = async () => {
     setActionLoading(true);
     
     try {
-      const updatedBatch = await markAsProcessed(batchId, processingNotes, user.name);
-      setBatch(updatedBatch);
-      showSuccess(`Batch ${batchId} marked as processed`);
+      console.log(`🏭 Processing batch ${batchId}...`);
+      
+      if (isConnected && service) {
+        // Generate QR code hash for the batch
+        const qrCodeHash = `QR-${batchId}-${Date.now()}`;
+        
+        // Use blockchain service
+        const result = await service.processBatch(parseInt(batchId), qrCodeHash);
+        console.log('📥 Process result:', result);
+        
+        if (result.success) {
+          showSuccess(`Batch ${batchId} processed successfully on blockchain`);
+          
+          // Get the updated batch data
+          const updatedBatchResult = await service.getBatch(parseInt(batchId));
+          if (updatedBatchResult.success) {
+            setBatch(updatedBatchResult.data);
+          }
+        } else {
+          throw new Error(result.error);
+        }
+      } else {
+        // Fallback to local storage
+        const updatedBatch = await markAsProcessed(batchId, processingNotes, user.name);
+        setBatch(updatedBatch);
+        showSuccess(`Batch ${batchId} marked as processed`);
+      }
       
       // Show QR code modal
       setQrModal({ isOpen: true });
@@ -153,7 +222,10 @@ const BatchDetails = () => {
       {/* Title */}
       <div className="text-center">
         <h1 className="text-3xl font-bold text-gray-900 mb-2">Manufacturing Details</h1>
-        <p className="text-gray-600">Process approved batches and generate QR codes</p>
+        <p className="text-gray-600">
+          Process approved batches and generate QR codes
+          {isConnected && <span className="text-green-600"> • Blockchain Data</span>}
+        </p>
       </div>
 
       {/* Main Content Grid */}
@@ -174,12 +246,12 @@ const BatchDetails = () => {
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600">Herb Name</span>
-              <span className="font-medium text-gray-900">{batch.herb}</span>
+              <span className="font-medium text-gray-900">{batch.herbName || batch.herb}</span>
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600">Status</span>
-              <StatusBadge status={batch.status} />
+              <StatusBadge status={batch.status || 'Pending'} />
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
@@ -187,7 +259,9 @@ const BatchDetails = () => {
                 <User size={16} className="mr-1" />
                 Farmer
               </span>
-              <span className="font-medium text-gray-900">{batch.farmer}</span>
+              <span className="font-medium text-gray-900 font-mono text-sm">
+                {batch.farmer ? `${batch.farmer.substring(0, 6)}...${batch.farmer.substring(batch.farmer.length - 4)}` : 'N/A'}
+              </span>
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
@@ -195,16 +269,18 @@ const BatchDetails = () => {
                 <Droplets size={16} className="mr-1" />
                 Moisture %
               </span>
-              <span className="font-medium text-gray-900">{batch.moisture}%</span>
+              <span className="font-medium text-gray-900">{batch.moisturePercent || batch.moisture}%</span>
             </div>
             
-            <div className="flex justify-between items-center py-3 border-b border-gray-100">
-              <span className="text-gray-600 flex items-center">
-                <Calendar size={16} className="mr-1" />
-                Harvest Date
-              </span>
-              <span className="font-medium text-gray-900">{formatDate(batch.harvestDate)}</span>
-            </div>
+            {batch.harvestDate && (
+              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                <span className="text-gray-600 flex items-center">
+                  <Calendar size={16} className="mr-1" />
+                  Harvest Date
+                </span>
+                <span className="font-medium text-gray-900">{formatDate(batch.harvestDate)}</span>
+              </div>
+            )}
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600 flex items-center">
@@ -222,9 +298,19 @@ const BatchDetails = () => {
             )}
             
             {batch.processedAt && (
-              <div className="flex justify-between items-center py-3">
+              <div className="flex justify-between items-center py-3 border-b border-gray-100">
                 <span className="text-gray-600">Processed</span>
                 <span className="font-medium text-gray-900">{formatDateTime(batch.processedAt)}</span>
+              </div>
+            )}
+            
+            {batch.qrCodeHash && (
+              <div className="flex justify-between items-center py-3">
+                <span className="text-gray-600 flex items-center">
+                  <QrCode size={16} className="mr-1" />
+                  QR Code
+                </span>
+                <span className="font-mono text-sm text-gray-900">{batch.qrCodeHash}</span>
               </div>
             )}
           </div>
@@ -271,35 +357,61 @@ const BatchDetails = () => {
         {/* Photo and Map */}
         <div className="space-y-6">
           {/* Photo */}
-          {batch.photoUrl && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="card"
-            >
-              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
-                <ImageIcon size={20} className="mr-2" />
-                Batch Photo
-              </h3>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className="card"
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <ImageIcon size={20} className="mr-2" />
+              Batch Photo
+            </h3>
+            
+            {(() => {
+              // Try to get image from local storage first
+              const storedImage = batch.photoIpfsHash ? getImage(batch.photoIpfsHash) : null;
               
-              {!imageError ? (
-                <img
-                  src={batch.photoUrl}
-                  alt={`${batch.herb} batch ${batch.id}`}
-                  className="w-full h-64 object-cover rounded-lg border border-gray-200"
-                  onError={() => setImageError(true)}
-                />
-              ) : (
-                <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
-                  <div className="text-center">
-                    <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                    <p className="text-sm text-gray-500">Image could not be loaded</p>
+              if (batch.photoUrl && !imageError) {
+                return (
+                  <img
+                    src={batch.photoUrl}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-64 object-cover rounded-lg border border-gray-200"
+                    onError={() => setImageError(true)}
+                  />
+                );
+              } else if (storedImage && !imageError) {
+                return (
+                  <img
+                    src={storedImage}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-64 object-cover rounded-lg border border-gray-200"
+                    onError={() => setImageError(true)}
+                  />
+                );
+              } else if (batch.photoIpfsHash) {
+                return (
+                  <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
+                    <div className="text-center">
+                      <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500 mb-2">Photo stored on IPFS</p>
+                      <p className="text-xs text-gray-400 font-mono">{batch.photoIpfsHash}</p>
+                    </div>
                   </div>
-                </div>
-              )}
-            </motion.div>
-          )}
+                );
+              } else {
+                return (
+                  <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
+                    <div className="text-center">
+                      <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">No photo available</p>
+                    </div>
+                  </div>
+                );
+              }
+            })()}
+          </motion.div>
 
           {/* Map */}
           <motion.div
@@ -331,7 +443,7 @@ const BatchDetails = () => {
         <h2 className="text-xl font-semibold text-gray-900 mb-6">Manufacturing Timeline</h2>
         
         <JourneyTimeline 
-          timeline={batch.timeline || []}
+          timeline={timeline}
           currentStatus={batch.status}
         />
       </motion.div>

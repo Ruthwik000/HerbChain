@@ -1,9 +1,11 @@
 export const validateBatchForm = (formData) => {
   const errors = {};
 
-  // Herb validation
-  if (!formData.herb || formData.herb.trim() === '') {
-    errors.herb = 'Herb selection is required';
+  // Herb name validation (support both herbName and herb fields)
+  const herbName = formData.herbName || formData.herb;
+  if (!herbName || herbName.trim() === '') {
+    errors.herbName = 'Herb name is required';
+    errors.herb = 'Herb name is required';
   }
 
   // Location validation
@@ -11,30 +13,22 @@ export const validateBatchForm = (formData) => {
     errors.location = 'Location is required';
   }
 
-  // Moisture validation
-  if (!formData.moisture) {
+  // Moisture validation (support both moisturePercent and moisture fields)
+  const moisture = formData.moisturePercent || formData.moisture;
+  if (!moisture) {
+    errors.moisturePercent = 'Moisture content is required';
     errors.moisture = 'Moisture content is required';
   } else {
-    const moisture = parseFloat(formData.moisture);
-    if (isNaN(moisture) || moisture < 0 || moisture > 15) {
-      errors.moisture = 'Moisture content must be between 0% and 15%';
+    const moistureValue = parseFloat(moisture);
+    if (isNaN(moistureValue) || moistureValue < 0 || moistureValue > 100) {
+      errors.moisturePercent = 'Moisture content must be between 0% and 100%';
+      errors.moisture = 'Moisture content must be between 0% and 100%';
     }
-    // Note: We allow moisture > 10% but it will be flagged in the UI
   }
 
-  // Harvest date validation
-  if (!formData.harvestDate) {
-    errors.harvestDate = 'Harvest date is required';
-  } else {
-    const harvestDate = new Date(formData.harvestDate);
-    const today = new Date();
-    const thirtyDaysAgo = new Date(today.getTime() - (30 * 24 * 60 * 60 * 1000));
-    
-    if (harvestDate > today) {
-      errors.harvestDate = 'Harvest date cannot be in the future';
-    } else if (harvestDate < thirtyDaysAgo) {
-      errors.harvestDate = 'Harvest date cannot be more than 30 days ago';
-    }
+  // Notes validation
+  if (!formData.notes || formData.notes.trim() === '') {
+    errors.notes = 'Additional notes are required';
   }
 
   // Photo validation (optional but if provided, should be valid)

@@ -28,12 +28,28 @@ export const authenticateUser = (username, password) => {
       id: user.id,
       name: user.name,
       role: user.role,
-      username
+      username,
+      authMethod: 'traditional'
     };
     localStorage.setItem('herbchain_user', JSON.stringify(userSession));
     return userSession;
   }
   return null;
+};
+
+// MetaMask authentication
+export const authenticateMetaMaskUser = (userData) => {
+  const userSession = {
+    id: userData.address,
+    name: userData.address.substring(0, 6) + '...' + userData.address.substring(userData.address.length - 4),
+    role: userData.role,
+    username: userData.address,
+    authMethod: 'metamask',
+    address: userData.address,
+    blockchainRole: userData.blockchainRole
+  };
+  localStorage.setItem('herbchain_user', JSON.stringify(userSession));
+  return userSession;
 };
 
 export const getCurrentUser = () => {

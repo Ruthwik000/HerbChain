@@ -15,23 +15,29 @@ import {
 } from 'lucide-react';
 import { getBatchById, approveBatch, rejectBatch } from '../../services/dataService';
 import { useAuth } from '../../context/AuthContext';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { useToast } from '../../components/ToastNotification';
 import StatusBadge from '../../components/StatusBadge';
 import JourneyTimeline from '../../components/JourneyTimeline';
 import MapView from '../../components/MapView';
 import ApproveRejectModal from '../../components/ApproveRejectModal';
 import { formatDate, formatDateTime } from '../../utils/formatDate';
+import { getImage, getAllImageHashes, getImageFromIPFS } from '../../services/imageService';
+import { debugImageStorage, checkImageHash } from '../../utils/imageDebug';
+import { relinkImages } from '../../utils/imageRelink';
 
 const BatchDetails = () => {
   const { batchId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isConnected, service, account } = useBlockchain();
   const { showSuccess, showError } = useToast();
   
   const [batch, setBatch] = useState(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [imageError, setImageError] = useState(false);
+  const [timeline, setTimeline] = useState([]);
   
   // Modal state
   const [modalState, setModalState] = useState({
@@ -42,7 +48,30 @@ const BatchDetails = () => {
   useEffect(() => {
     const loadBatch = async () => {
       try {
-        const batchData = await getBatchById(batchId);
+        console.log('🧪 Loading lab batch details for ID:', batchId);
+        console.log('  - isConnected:', isConnected);
+        console.log('  - account:', account);
+        
+        let batchData = null;
+        
+        if (isConnected && service) {
+          console.log('📡 Fetching batch from blockchain...');
+          // Try to get batch from blockchain first
+          const result = await service.getBatch(parseInt(batchId));
+          console.log('📥 Blockchain result:', result);
+          
+          if (result.success) {
+            batchData = result.data;
+            console.log('✅ Batch loaded from blockchain:', batchData);
+          }
+        }
+        
+        // Fallback to local storage if blockchain fails
+        if (!batchData) {
+          console.log('📁 Falling back to local storage...');
+          batchData = await getBatchById(batchId);
+        }
+        
         if (!batchData) {
           showError('Batch not found');
           navigate('/lab/dashboard');
@@ -50,7 +79,29 @@ const BatchDetails = () => {
         }
         
         setBatch(batchData);
+        
+        // Try to relink images if there's a mismatch
+        if (batchData.photoIpfsHash && !getImage(batchData.photoIpfsHash)) {
+          console.log('🔗 Attempting to relink image for batch...');
+          relinkImages(batchData);
+        }
+        
+        // Fetch timeline from blockchain if connected
+        if (isConnected && service) {
+          console.log('📅 Fetching timeline from blockchain...');
+          const timelineResult = await service.getBatchTimeline(parseInt(batchId));
+          if (timelineResult.success) {
+            setTimeline(timelineResult.timeline);
+            console.log('✅ Timeline loaded from blockchain:', timelineResult.timeline);
+          } else {
+            console.log('❌ Failed to load timeline from blockchain');
+            setTimeline(batchData.timeline || []);
+          }
+        } else {
+          setTimeline(batchData.timeline || []);
+        }
       } catch (error) {
+        console.error('❌ Error loading lab batch details:', error);
         showError('Failed to load batch details');
         navigate('/lab/dashboard');
       } finally {
@@ -61,7 +112,7 @@ const BatchDetails = () => {
     if (batchId) {
       loadBatch();
     }
-  }, [batchId, navigate, showError]);
+  }, [batchId, navigate, showError, isConnected, service, account]);
 
   const handleApprove = () => {
     setModalState({ isOpen: true, action: 'approve' });
@@ -75,20 +126,48 @@ const BatchDetails = () => {
     setActionLoading(true);
     
     try {
-      let updatedBatch;
+      console.log(`🧪 ${modalState.action}ing batch ${batchId}...`);
       
-      if (modalState.action === 'approve') {
-        updatedBatch = await approveBatch(batchId, user.name);
-        showSuccess(`Batch ${batchId} approved successfully`);
+      let result;
+      
+      if (isConnected && service) {
+        // Use blockchain service
+        if (modalState.action === 'approve') {
+          result = await service.approveBatch(parseInt(batchId));
+          console.log('📥 Approve result:', result);
+        } else {
+          result = await service.rejectBatch(parseInt(batchId), reason);
+          console.log('📥 Reject result:', result);
+        }
+        
+        if (result.success) {
+          showSuccess(`Batch ${batchId} ${modalState.action}d successfully on blockchain`);
+          
+          // Reload batch data to get updated status
+          const updatedResult = await service.getBatch(parseInt(batchId));
+          if (updatedResult.success) {
+            setBatch(updatedResult.data);
+          }
+        } else {
+          throw new Error(result.error);
+        }
       } else {
-        updatedBatch = await rejectBatch(batchId, reason, user.name);
-        showSuccess(`Batch ${batchId} rejected`);
+        // Fallback to local storage
+        let updatedBatch;
+        if (modalState.action === 'approve') {
+          updatedBatch = await approveBatch(batchId, user.name);
+        } else {
+          updatedBatch = await rejectBatch(batchId, reason, user.name);
+        }
+        
+        setBatch(updatedBatch);
+        showSuccess(`Batch ${batchId} ${modalState.action}d successfully`);
       }
       
-      setBatch(updatedBatch);
       setModalState({ isOpen: false, action: null });
     } catch (error) {
-      showError(`Failed to ${modalState.action} batch`);
+      console.error(`❌ Failed to ${modalState.action} batch:`, error);
+      showError(`Failed to ${modalState.action} batch: ${error.message}`);
     } finally {
       setActionLoading(false);
     }
@@ -159,11 +238,14 @@ const BatchDetails = () => {
       {/* Title */}
       <div className="text-center">
         <h1 className="text-3xl font-bold text-gray-900 mb-2">Batch Review</h1>
-        <p className="text-gray-600">Quality assessment and approval</p>
+        <p className="text-gray-600">
+          Quality assessment and approval
+          {isConnected && <span className="text-green-600"> • Blockchain Data</span>}
+        </p>
       </div>
 
       {/* Quality Alert */}
-      {batch.moisture > 10 && (
+      {(batch.moisturePercent || batch.moisture) > 10 && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -174,7 +256,7 @@ const BatchDetails = () => {
             <div>
               <h4 className="font-medium text-orange-800">High Moisture Content</h4>
               <p className="text-sm text-orange-700">
-                This batch has {batch.moisture}% moisture content, which is above the recommended 10% threshold.
+                This batch has {batch.moisturePercent || batch.moisture}% moisture content, which is above the recommended 10% threshold.
               </p>
             </div>
           </div>
@@ -199,12 +281,12 @@ const BatchDetails = () => {
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600">Herb Name</span>
-              <span className="font-medium text-gray-900">{batch.herb}</span>
+              <span className="font-medium text-gray-900">{batch.herbName || batch.herb}</span>
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600">Status</span>
-              <StatusBadge status={batch.status} />
+              <StatusBadge status={batch.status || 'Pending'} />
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
@@ -212,7 +294,9 @@ const BatchDetails = () => {
                 <User size={16} className="mr-1" />
                 Farmer
               </span>
-              <span className="font-medium text-gray-900">{batch.farmer}</span>
+              <span className="font-medium text-gray-900 font-mono text-sm">
+                {batch.farmer ? `${batch.farmer.substring(0, 6)}...${batch.farmer.substring(batch.farmer.length - 4)}` : 'N/A'}
+              </span>
             </div>
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
@@ -220,18 +304,20 @@ const BatchDetails = () => {
                 <Droplets size={16} className="mr-1" />
                 Moisture %
               </span>
-              <span className={`font-medium ${batch.moisture > 10 ? 'text-orange-600' : 'text-gray-900'}`}>
-                {batch.moisture}%
+              <span className={`font-medium ${(batch.moisturePercent || batch.moisture) > 10 ? 'text-orange-600' : 'text-gray-900'}`}>
+                {batch.moisturePercent || batch.moisture}%
               </span>
             </div>
             
-            <div className="flex justify-between items-center py-3 border-b border-gray-100">
-              <span className="text-gray-600 flex items-center">
-                <Calendar size={16} className="mr-1" />
-                Harvest Date
-              </span>
-              <span className="font-medium text-gray-900">{formatDate(batch.harvestDate)}</span>
-            </div>
+            {batch.harvestDate && (
+              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                <span className="text-gray-600 flex items-center">
+                  <Calendar size={16} className="mr-1" />
+                  Harvest Date
+                </span>
+                <span className="font-medium text-gray-900">{formatDate(batch.harvestDate)}</span>
+              </div>
+            )}
             
             <div className="flex justify-between items-center py-3 border-b border-gray-100">
               <span className="text-gray-600 flex items-center">
@@ -273,35 +359,61 @@ const BatchDetails = () => {
         {/* Photo and Map */}
         <div className="space-y-6">
           {/* Photo */}
-          {batch.photoUrl && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="card"
-            >
-              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
-                <ImageIcon size={20} className="mr-2" />
-                Batch Photo
-              </h3>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className="card"
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <ImageIcon size={20} className="mr-2" />
+              Batch Photo
+            </h3>
+            
+            {(() => {
+              // Try to get image from local storage first
+              const storedImage = batch.photoIpfsHash ? getImage(batch.photoIpfsHash) : null;
               
-              {!imageError ? (
-                <img
-                  src={batch.photoUrl}
-                  alt={`${batch.herb} batch ${batch.id}`}
-                  className="w-full h-64 object-cover rounded-lg border border-gray-200"
-                  onError={() => setImageError(true)}
-                />
-              ) : (
-                <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
-                  <div className="text-center">
-                    <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                    <p className="text-sm text-gray-500">Image could not be loaded</p>
+              if (batch.photoUrl && !imageError) {
+                return (
+                  <img
+                    src={batch.photoUrl}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-64 object-cover rounded-lg border border-gray-200"
+                    onError={() => setImageError(true)}
+                  />
+                );
+              } else if (storedImage && !imageError) {
+                return (
+                  <img
+                    src={storedImage}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-64 object-cover rounded-lg border border-gray-200"
+                    onError={() => setImageError(true)}
+                  />
+                );
+              } else if (batch.photoIpfsHash) {
+                return (
+                  <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
+                    <div className="text-center">
+                      <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500 mb-2">Photo stored on IPFS</p>
+                      <p className="text-xs text-gray-400 font-mono">{batch.photoIpfsHash}</p>
+                    </div>
                   </div>
-                </div>
-              )}
-            </motion.div>
-          )}
+                );
+              } else {
+                return (
+                  <div className="w-full h-64 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center">
+                    <div className="text-center">
+                      <ImageIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">No photo available</p>
+                    </div>
+                  </div>
+                );
+              }
+            })()}
+          </motion.div>
 
           {/* Map */}
           <motion.div
@@ -333,7 +445,7 @@ const BatchDetails = () => {
         <h2 className="text-xl font-semibold text-gray-900 mb-6">Processing Timeline</h2>
         
         <JourneyTimeline 
-          timeline={batch.timeline || []}
+          timeline={timeline}
           currentStatus={batch.status}
         />
       </motion.div>

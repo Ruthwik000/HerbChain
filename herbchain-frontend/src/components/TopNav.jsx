@@ -48,32 +48,26 @@ const TopNav = () => {
   };
 
   return (
-    <nav className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-sm">
+    <nav className="sticky top-0 z-50 glass border-b border-white/20 shadow-modern backdrop-blur-xl">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
+        <div className="flex justify-between items-center h-20">
           {/* Logo */}
           <div className="flex items-center">
-            <Link to="/" className="flex items-center">
-              <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
-                <span className="text-white text-lg">🌿</span>
+            <Link to="/" className="flex items-center group">
+              <div className="w-12 h-12 bg-gradient-to-br from-green-500 to-emerald-600 rounded-2xl flex items-center justify-center shadow-lg shadow-green-500/25 group-hover:shadow-xl group-hover:shadow-green-500/30 transition-all duration-300">
+                <span className="text-white text-2xl">🌿</span>
               </div>
-              <span className="ml-2 text-xl font-bold text-green-800">HerbChain</span>
+              <span className="ml-3 text-2xl font-bold gradient-text">HerbChain</span>
             </Link>
           </div>
 
           {/* Navigation Links */}
-          <div className="hidden md:flex items-center space-x-8">
+          <div className="hidden md:flex items-center space-x-2">
             {navLinks.map((link) => (
               <Link
                 key={link.path}
                 to={link.path}
-                className={`
-                  px-3 py-2 text-sm font-medium transition-colors
-                  ${isActiveLink(link.path)
-                    ? 'text-green-600 border-b-2 border-green-600'
-                    : 'text-gray-600 hover:text-gray-900'
-                  }
-                `}
+                className={`nav-link ${isActiveLink(link.path) ? 'nav-link-active' : ''}`}
               >
                 {link.label}
               </Link>
@@ -82,17 +76,19 @@ const TopNav = () => {
 
           {/* User Menu */}
           <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2">
-              <span className="text-lg">{getRoleIcon(user?.role)}</span>
+            <div className="flex items-center space-x-3 px-4 py-2 bg-white/50 rounded-xl border border-white/20">
+              <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-emerald-600 rounded-xl flex items-center justify-center shadow-sm">
+                <span className="text-white text-lg">{getRoleIcon(user?.role)}</span>
+              </div>
               <div className="hidden sm:block">
-                <p className="text-sm font-medium text-gray-900">{user?.name}</p>
-                <p className="text-xs text-gray-500">{user?.role}</p>
+                <p className="text-sm font-semibold text-gray-900">{user?.name}</p>
+                <p className="text-xs text-gray-600 font-medium">{user?.role}</p>
               </div>
             </div>
             
             <button
               onClick={logout}
-              className="p-2 text-gray-400 hover:text-gray-600 transition-colors"
+              className="p-3 text-gray-400 hover:text-gray-600 hover:bg-white/50 rounded-xl transition-all duration-200"
               title="Logout"
               aria-label="Logout"
             >

@@ -7,22 +7,29 @@ import {
   XCircle,
   AlertCircle,
   Award,
-  Shield
+  Shield,
+  ExternalLink,
+  Clock
 } from 'lucide-react';
 import { getBatchById } from '../../services/dataService';
 import { addToConsumerHistory } from '../../services/localStorageService';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { useToast } from '../../components/ToastNotification';
 import { formatDate } from '../../utils/formatDate';
+import { getImage, getImageFromIPFS } from '../../services/imageService';
 
 const BatchDetails = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { showError } = useToast();
+  const { showError, showSuccess } = useToast();
+  const { isConnected, service } = useBlockchain();
   
   const batchId = searchParams.get('batchId');
   const [batch, setBatch] = useState(null);
   const [loading, setLoading] = useState(true);
   const [imageError, setImageError] = useState(false);
+  const [dataSource, setDataSource] = useState(''); // 'blockchain' or 'local'
+  const [timeline, setTimeline] = useState([]);
 
   useEffect(() => {
     const loadBatch = async () => {
@@ -33,7 +40,40 @@ const BatchDetails = () => {
       }
 
       try {
-        const batchData = await getBatchById(batchId);
+        console.log('🔍 Consumer loading batch details for ID:', batchId);
+        console.log('  - isConnected:', isConnected);
+        
+        let batchData = null;
+        let source = 'local';
+        
+        // Try blockchain first if connected
+        if (isConnected && service) {
+          console.log('📡 Fetching from blockchain...');
+          try {
+            const result = await service.getBatch(parseInt(batchId));
+            console.log('📥 Blockchain result:', result);
+            
+            if (result.success) {
+              batchData = result.data;
+              source = 'blockchain';
+              showSuccess('Loaded from blockchain!');
+              console.log('✅ Batch loaded from blockchain:', batchData);
+            }
+          } catch (blockchainError) {
+            console.log('⚠️ Blockchain fetch failed, trying local storage...');
+          }
+        }
+        
+        // Fallback to local storage
+        if (!batchData) {
+          console.log('📁 Falling back to local storage...');
+          batchData = await getBatchById(batchId);
+          if (batchData) {
+            source = 'local';
+            console.log('✅ Batch loaded from local storage:', batchData);
+          }
+        }
+        
         if (!batchData) {
           showError('Batch not found');
           navigate('/consumer/trace');
@@ -41,11 +81,28 @@ const BatchDetails = () => {
         }
         
         setBatch(batchData);
+        setDataSource(source);
+        
+        // Fetch timeline from blockchain if connected
+        if (isConnected && service && source === 'blockchain') {
+          console.log('📅 Fetching timeline from blockchain...');
+          const timelineResult = await service.getBatchTimeline(parseInt(batchId));
+          if (timelineResult.success) {
+            setTimeline(timelineResult.timeline);
+            console.log('✅ Timeline loaded from blockchain:', timelineResult.timeline);
+          } else {
+            console.log('❌ Failed to load timeline from blockchain');
+            setTimeline(batchData.timeline || []);
+          }
+        } else {
+          setTimeline(batchData.timeline || []);
+        }
         
         // Add to consumer history
         addToConsumerHistory(batchId);
         
       } catch (error) {
+        console.error('❌ Error loading batch details:', error);
         showError('Failed to load batch details');
         navigate('/consumer/trace');
       } finally {
@@ -54,7 +111,7 @@ const BatchDetails = () => {
     };
 
     loadBatch();
-  }, [batchId, navigate, showError]);
+  }, [batchId, navigate, showError, showSuccess, isConnected, service]);
 
   const getAuthenticityStatus = (batch) => {
     if (!batch) return { status: 'unknown', message: 'Unknown', color: 'gray' };
@@ -146,21 +203,45 @@ const BatchDetails = () => {
           </div>
 
           {/* Product Image */}
-          {batch.photoUrl && !imageError && (
-            <div className="mb-6">
-              <img
-                src={batch.photoUrl}
-                alt={`${batch.herb} batch ${batch.id}`}
-                className="w-full h-48 object-cover rounded-xl"
-                onError={() => setImageError(true)}
-              />
-            </div>
-          )}
+          {(() => {
+            // Try to get image from local storage first
+            const storedImage = batch.photoIpfsHash ? getImage(batch.photoIpfsHash) : null;
+            
+            if (batch.photoUrl && !imageError) {
+              return (
+                <div className="mb-6">
+                  <img
+                    src={batch.photoUrl}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-48 object-cover rounded-xl"
+                    onError={() => setImageError(true)}
+                  />
+                </div>
+              );
+            } else if (storedImage && !imageError) {
+              return (
+                <div className="mb-6">
+                  <img
+                    src={storedImage}
+                    alt={`${batch.herbName || batch.herb} batch ${batch.id}`}
+                    className="w-full h-48 object-cover rounded-xl"
+                    onError={() => setImageError(true)}
+                  />
+                </div>
+              );
+            }
+            return null;
+          })()}
 
           {/* Product Name */}
           <div className="text-center mb-4">
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">{batch.herb}</h2>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">{batch.herbName || batch.herb}</h2>
             <p className="text-gray-600">Organic • Premium Quality</p>
+            {dataSource === 'blockchain' && (
+              <div className="inline-flex items-center px-3 py-1 bg-green-100 text-green-800 text-sm font-medium rounded-full mt-2">
+                🔗 Verified on Blockchain
+              </div>
+            )}
           </div>
 
           {/* Authenticity Status */}
@@ -178,7 +259,7 @@ const BatchDetails = () => {
 
           {/* Quality Badges */}
           <div className="flex flex-wrap justify-center gap-2 mb-4">
-            {batch.moisture <= 10 && (
+            {(batch.moisturePercent || batch.moisture) <= 10 && (
               <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
                 <Award size={12} className="mr-1" />
                 Premium Quality
@@ -206,37 +287,85 @@ const BatchDetails = () => {
           <h2 className="text-xl font-semibold text-gray-900 mb-6 text-center">Journey Timeline</h2>
           
           <div className="space-y-6">
-            {/* Harvested */}
-            <div className="flex items-start space-x-4">
-              <div className="flex-shrink-0">
-                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-                  <span className="text-2xl">🌱</span>
-                </div>
-              </div>
-              <div className="flex-1">
-                <h3 className="font-semibold text-gray-900">Harvested by Farmer</h3>
-                <p className="text-sm text-gray-600 mt-1">{batch.farmer}</p>
-                <p className="text-sm text-gray-500">{batch.location}</p>
-                <p className="text-xs text-gray-400 mt-1">{formatDate(batch.harvestDate)}</p>
-              </div>
-              <CheckCircle className="w-5 h-5 text-green-500 mt-1" />
-            </div>
+            {timeline.length > 0 ? (
+              // Display blockchain timeline if available
+              timeline.map((stage, index) => {
+                const getStageIcon = (stageName) => {
+                  if (stageName.includes('Created')) return '🌱';
+                  if (stageName.includes('Approved')) return '🧪';
+                  if (stageName.includes('Rejected')) return '❌';
+                  if (stageName.includes('Processed')) return '🏭';
+                  return '📋';
+                };
+                
+                const getStageColor = (status) => {
+                  if (status === 'Completed') return 'text-green-500';
+                  if (status === 'Rejected') return 'text-red-500';
+                  return 'text-blue-500';
+                };
 
-            {/* Lab Approved */}
-            {(batch.status === 'Approved' || batch.status === 'Processed') && (
-              <div className="flex items-start space-x-4">
-                <div className="flex-shrink-0">
-                  <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                    <span className="text-2xl">🧪</span>
+                return (
+                  <div key={index} className="flex items-start space-x-4">
+                    <div className="flex-shrink-0">
+                      <div className={`w-12 h-12 ${stage.status === 'Completed' ? 'bg-green-100' : stage.status === 'Rejected' ? 'bg-red-100' : 'bg-blue-100'} rounded-full flex items-center justify-center`}>
+                        <span className="text-2xl">{getStageIcon(stage.stage)}</span>
+                      </div>
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-gray-900">{stage.stage}</h3>
+                      <p className="text-sm text-gray-600 mt-1">{stage.actor}</p>
+                      <p className="text-sm text-gray-500">{stage.notes}</p>
+                      <p className="text-xs text-gray-400 mt-1">{formatDate(stage.date)}</p>
+                      {dataSource === 'blockchain' && (
+                        <p className="text-xs text-blue-600 mt-1">Block #{stage.blockNumber}</p>
+                      )}
+                    </div>
+                    <div className={getStageColor(stage.status)}>
+                      {stage.status === 'Completed' ? <CheckCircle className="w-5 h-5" /> : 
+                       stage.status === 'Rejected' ? <XCircle className="w-5 h-5" /> : 
+                       <Clock className="w-5 h-5" />}
+                    </div>
                   </div>
+                );
+              })
+            ) : (
+              // Fallback to static timeline for local data
+              <>
+                {/* Harvested */}
+                <div className="flex items-start space-x-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                      <span className="text-2xl">🌱</span>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900">Harvested by Farmer</h3>
+                    <p className="text-sm text-gray-600 mt-1">
+                      {batch.farmer ? `${batch.farmer.substring(0, 6)}...${batch.farmer.substring(batch.farmer.length - 4)}` : 'Local Farmer'}
+                    </p>
+                    <p className="text-sm text-gray-500">{batch.location}</p>
+                    <p className="text-xs text-gray-400 mt-1">{formatDate(batch.harvestDate)}</p>
+                  </div>
+                  <CheckCircle className="w-5 h-5 text-green-500 mt-1" />
                 </div>
-                <div className="flex-1">
-                  <h3 className="font-semibold text-gray-900">Lab Approved</h3>
-                  <p className="text-sm text-gray-600 mt-1">Quality checks passed</p>
-                  <p className="text-xs text-gray-400 mt-1">{formatDate(batch.approvedAt)}</p>
-                </div>
-                <CheckCircle className="w-5 h-5 text-green-500 mt-1" />
-              </div>
+
+                {/* Lab Approved */}
+                {(batch.status === 'Approved' || batch.status === 'Processed') && (
+                  <div className="flex items-start space-x-4">
+                    <div className="flex-shrink-0">
+                      <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                        <span className="text-2xl">🧪</span>
+                      </div>
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-gray-900">Lab Approved</h3>
+                      <p className="text-sm text-gray-600 mt-1">Quality checks passed</p>
+                      <p className="text-xs text-gray-400 mt-1">{formatDate(batch.approvedAt)}</p>
+                    </div>
+                    <CheckCircle className="w-5 h-5 text-green-500 mt-1" />
+                  </div>
+                )}
+              </>
             )}
 
             {/* Processed */}
@@ -331,8 +460,8 @@ const BatchDetails = () => {
             </div>
             <div className="flex justify-between items-center">
               <span className="text-gray-600">Quality</span>
-              <span className={`font-medium ${batch.moisture <= 10 ? 'text-green-600' : 'text-orange-600'}`}>
-                {batch.moisture <= 10 ? 'Premium' : 'Standard'} ({batch.moisture}% moisture)
+              <span className={`font-medium ${(batch.moisturePercent || batch.moisture) <= 10 ? 'text-green-600' : 'text-orange-600'}`}>
+                {(batch.moisturePercent || batch.moisture) <= 10 ? 'Premium' : 'Standard'} ({batch.moisturePercent || batch.moisture}% moisture)
               </span>
             </div>
           </div>
@@ -355,7 +484,7 @@ const BatchDetails = () => {
           <details className="group">
             <summary className="flex items-center justify-between cursor-pointer">
               <h3 className="text-lg font-semibold text-gray-900 flex items-center">
-                <Shield size={20} className="mr-2 text-green-600" />
+                <Shield size={20} className={`mr-2 ${dataSource === 'blockchain' ? 'text-green-600' : 'text-gray-400'}`} />
                 Blockchain Verification
               </h3>
               <span className="text-gray-400 group-open:rotate-180 transition-transform">
@@ -364,21 +493,52 @@ const BatchDetails = () => {
             </summary>
             
             <div className="mt-4 pt-4 border-t border-gray-100 space-y-3">
-              <div className="flex justify-between items-center">
-                <span className="text-gray-600">Transaction ID</span>
-                <span className="font-mono text-sm text-blue-600">0x7a8b9c...</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-600">Block Number</span>
-                <span className="font-mono text-sm text-gray-900">#18,542,891</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-600">Network</span>
-                <span className="text-sm text-gray-900">Ethereum Mainnet</span>
-              </div>
-              <button className="w-full mt-3 text-blue-600 hover:text-blue-800 text-sm font-medium">
-                View on Blockchain Explorer →
-              </button>
+              {dataSource === 'blockchain' ? (
+                <>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Data Source</span>
+                    <span className="text-green-600 font-medium">✅ Blockchain</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Batch ID</span>
+                    <span className="font-mono text-sm text-gray-900">{batch.id}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Farmer Address</span>
+                    <span className="font-mono text-sm text-blue-600">
+                      {batch.farmer ? `${batch.farmer.substring(0, 6)}...${batch.farmer.substring(batch.farmer.length - 4)}` : 'N/A'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Network</span>
+                    <span className="text-sm text-gray-900">Hardhat Local</span>
+                  </div>
+                  <button 
+                    className="w-full mt-3 text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center justify-center"
+                    onClick={() => window.open(`http://localhost:8545`, '_blank')}
+                  >
+                    View on Local Network <ExternalLink size={14} className="ml-1" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Data Source</span>
+                    <span className="text-orange-600 font-medium">📁 Local Storage</span>
+                  </div>
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    <p className="text-yellow-800 text-sm">
+                      This batch data is stored locally. Connect to blockchain for verified data.
+                    </p>
+                  </div>
+                  <button 
+                    className="w-full mt-3 text-gray-500 text-sm font-medium cursor-not-allowed"
+                    disabled
+                  >
+                    Blockchain verification not available
+                  </button>
+                </>
+              )}
             </div>
           </details>
         </motion.div>

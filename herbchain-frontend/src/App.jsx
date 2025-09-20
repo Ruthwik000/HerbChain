@@ -1,6 +1,7 @@
 
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { BlockchainProvider } from './context/BlockchainContext';
 import { ToastContainer, useToast } from './components/ToastNotification';
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -134,13 +135,15 @@ const AppRoutes = () => {
 function App() {
   return (
     <ErrorBoundary>
-      <AuthProvider>
-        <Router>
-          <div className="min-h-screen bg-gray-50">
-            <AppRoutes />
-          </div>
-        </Router>
-      </AuthProvider>
+      <BlockchainProvider>
+        <AuthProvider>
+          <Router>
+            <div className="min-h-screen bg-gray-50">
+              <AppRoutes />
+            </div>
+          </Router>
+        </AuthProvider>
+      </BlockchainProvider>
     </ErrorBoundary>
   );
 }

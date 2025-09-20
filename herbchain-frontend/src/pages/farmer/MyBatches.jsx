@@ -3,12 +3,14 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Search, Filter, Plus } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { getBatchesByRole } from '../../services/dataService';
 import StatusBadge from '../../components/StatusBadge';
 import { formatDate } from '../../utils/formatDate';
 
 const MyBatches = () => {
   const { user } = useAuth();
+  const { isConnected, service, account } = useBlockchain();
   const [batches, setBatches] = useState([]);
   const [filteredBatches, setFilteredBatches] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -18,33 +20,72 @@ const MyBatches = () => {
   useEffect(() => {
     const loadBatches = async () => {
       try {
-        const batchesData = await getBatchesByRole('Farmer', user.id);
-        setBatches(batchesData);
-        setFilteredBatches(batchesData);
+        console.log('🔍 Loading batches...');
+        console.log('  - isConnected:', isConnected);
+        console.log('  - account:', account);
+        console.log('  - service:', !!service);
+
+        if (isConnected && service && account) {
+          console.log('📡 Fetching batches from blockchain...');
+          // Get batches from blockchain
+          const result = await service.getFarmerBatches(account);
+          console.log('📥 Blockchain result:', result);
+          
+          if (result.success) {
+            console.log('✅ Batches loaded from blockchain:', result.batches);
+            setBatches(result.batches);
+            setFilteredBatches(result.batches);
+          } else {
+            console.log('❌ Failed to load from blockchain, falling back to local storage');
+            // Fallback to local storage
+            const batchesData = await getBatchesByRole('Farmer', user.id);
+            setBatches(batchesData);
+            setFilteredBatches(batchesData);
+          }
+        } else {
+          console.log('📁 Loading from local storage (not connected to blockchain)');
+          // Fallback to local storage
+          const batchesData = await getBatchesByRole('Farmer', user.id);
+          setBatches(batchesData);
+          setFilteredBatches(batchesData);
+        }
       } catch (error) {
-        console.error('Error loading batches:', error);
+        console.error('❌ Error loading batches:', error);
+        // Fallback to local storage on error
+        try {
+          const batchesData = await getBatchesByRole('Farmer', user.id);
+          setBatches(batchesData);
+          setFilteredBatches(batchesData);
+        } catch (fallbackError) {
+          console.error('❌ Fallback also failed:', fallbackError);
+        }
       } finally {
         setLoading(false);
       }
     };
 
     loadBatches();
-  }, [user.id]);
+  }, [user.id, isConnected, service, account]);
 
   useEffect(() => {
     let filtered = batches;
 
     // Filter by search term
     if (searchTerm) {
-      filtered = filtered.filter(batch =>
-        batch.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        batch.herb.toLowerCase().includes(searchTerm.toLowerCase())
-      );
+      filtered = filtered.filter(batch => {
+        const batchId = batch.id?.toString() || '';
+        const herbName = batch.herbName || batch.herb || '';
+        return batchId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+               herbName.toLowerCase().includes(searchTerm.toLowerCase());
+      });
     }
 
     // Filter by status
     if (statusFilter !== 'All') {
-      filtered = filtered.filter(batch => batch.status === statusFilter);
+      filtered = filtered.filter(batch => {
+        const status = batch.status || 'Pending';
+        return status === statusFilter;
+      });
     }
 
     setFilteredBatches(filtered);
@@ -68,15 +109,24 @@ const MyBatches = () => {
           <h1 className="text-3xl font-bold text-gray-900">My Batches</h1>
           <p className="mt-2 text-gray-600">
             Manage and track all your herb batches
+            {isConnected && <span className="text-green-600"> • Connected to Blockchain</span>}
           </p>
         </div>
-        <Link
-          to="/farmer/create-batch"
-          className="mt-4 sm:mt-0 btn-primary flex items-center"
-        >
-          <Plus size={20} className="mr-2" />
-          Create New Batch
-        </Link>
+        <div className="flex space-x-2 mt-4 sm:mt-0">
+          <button
+            onClick={() => window.location.reload()}
+            className="btn-secondary flex items-center"
+          >
+            🔄 Refresh
+          </button>
+          <Link
+            to="/farmer/create-batch"
+            className="btn-primary flex items-center"
+          >
+            <Plus size={20} className="mr-2" />
+            Create New Batch
+          </Link>
+        </div>
       </div>
 
       {/* Filters */}
@@ -144,7 +194,7 @@ const MyBatches = () => {
                 <div className="flex items-center space-x-4 mb-4 sm:mb-0">
                   <div className="w-16 h-16 bg-green-100 rounded-lg flex items-center justify-center">
                     <span className="text-green-600 font-bold text-lg">
-                      {batch.herb.charAt(0)}
+                      {(batch.herbName || batch.herb || 'H').charAt(0)}
                     </span>
                   </div>
                   <div>
@@ -152,9 +202,9 @@ const MyBatches = () => {
                       to={`/farmer/batch/${batch.id}`}
                       className="text-lg font-semibold text-gray-900 hover:text-green-600"
                     >
-                      {batch.id}
+                      Batch #{batch.id}
                     </Link>
-                    <p className="text-gray-600">{batch.herb}</p>
+                    <p className="text-gray-600">{batch.herbName || batch.herb}</p>
                     <p className="text-sm text-gray-500">
                       {batch.location} • {formatDate(batch.createdAt)}
                     </p>
@@ -164,9 +214,9 @@ const MyBatches = () => {
                 <div className="flex items-center justify-between sm:justify-end space-x-4">
                   <div className="text-right">
                     <p className="text-sm text-gray-500">Moisture</p>
-                    <p className="font-medium">{batch.moisture}%</p>
+                    <p className="font-medium">{batch.moisturePercent || batch.moisture}%</p>
                   </div>
-                  <StatusBadge status={batch.status} />
+                  <StatusBadge status={batch.status || 'Pending'} />
                   <Link
                     to={`/farmer/batch/${batch.id}`}
                     className="btn-secondary text-sm"

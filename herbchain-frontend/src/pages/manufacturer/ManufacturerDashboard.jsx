@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Search, Filter, Factory, CheckCircle, Package, Clock } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useBlockchain } from '../../context/BlockchainContext';
 import { getBatchesByRole, markAsProcessed } from '../../services/dataService';
 import { useToast } from '../../components/ToastNotification';
 import BatchProcessingCard from '../../components/BatchProcessingCard';
@@ -9,6 +10,7 @@ import QRCodeModal from '../../components/QRCodeModal';
 
 const ManufacturerDashboard = () => {
   const { user } = useAuth();
+  const { isConnected, service, account } = useBlockchain();
   const { showSuccess, showError } = useToast();
   
   const [batches, setBatches] = useState([]);
@@ -27,7 +29,7 @@ const ManufacturerDashboard = () => {
 
   useEffect(() => {
     loadBatches();
-  }, []);
+  }, [isConnected, service, account]);
 
   useEffect(() => {
     filterBatches();
@@ -35,10 +37,68 @@ const ManufacturerDashboard = () => {
 
   const loadBatches = async () => {
     try {
-      const batchesData = await getBatchesByRole('Manufacturer', user.id);
+      console.log('🏭 Loading manufacturer batches...');
+      console.log('  - isConnected:', isConnected);
+      console.log('  - account:', account);
+      
+      let batchesData = [];
+      
+      if (isConnected && service) {
+        console.log('📡 Fetching batches from blockchain...');
+        
+        // Get approved batches that are ready for processing
+        const approvedResult = await service.getApprovedBatches();
+        console.log('📥 Approved batches result:', approvedResult);
+        
+        if (approvedResult.success) {
+          batchesData = approvedResult.batches;
+          console.log('✅ Approved batches loaded from blockchain:', batchesData);
+        }
+        
+        // Also get any processed batches to show complete picture
+        try {
+          // Get total batches and check for processed ones
+          const totalBatchesResult = await service.getTotalBatches();
+          if (totalBatchesResult.success && totalBatchesResult.total > 0) {
+            const allBatchIds = new Set(batchesData.map(b => b.id));
+            
+            for (let i = 0; i < totalBatchesResult.total; i++) {
+              if (!allBatchIds.has(i)) {
+                try {
+                  const batchResult = await service.getBatch(i);
+                  if (batchResult.success && batchResult.data.status === 'Processed') {
+                    batchesData.push(batchResult.data);
+                  }
+                } catch (error) {
+                  console.log(`⚠️ Could not fetch batch ${i}:`, error.message);
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.log('⚠️ Could not fetch processed batches:', error.message);
+        }
+        
+        if (batchesData.length === 0) {
+          console.log('📁 No blockchain batches found, falling back to local storage');
+          batchesData = await getBatchesByRole('Manufacturer', user.id);
+        }
+      } else {
+        console.log('📁 Loading from local storage (not connected to blockchain)');
+        batchesData = await getBatchesByRole('Manufacturer', user.id);
+      }
+      
       setBatches(batchesData);
     } catch (error) {
-      showError('Failed to load batches');
+      console.error('❌ Error loading manufacturer batches:', error);
+      // Fallback to local storage on error
+      try {
+        const batchesData = await getBatchesByRole('Manufacturer', user.id);
+        setBatches(batchesData);
+      } catch (fallbackError) {
+        console.error('❌ Fallback also failed:', fallbackError);
+        showError('Failed to load batches');
+      }
     } finally {
       setLoading(false);
     }
@@ -49,21 +109,31 @@ const ManufacturerDashboard = () => {
 
     // Filter by search term
     if (searchTerm) {
-      filtered = filtered.filter(batch =>
-        batch.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        batch.herb.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        batch.farmer.toLowerCase().includes(searchTerm.toLowerCase())
-      );
+      filtered = filtered.filter(batch => {
+        const batchId = batch.id?.toString() || '';
+        const herbName = batch.herbName || batch.herb || '';
+        const farmerAddress = batch.farmer || '';
+        
+        return batchId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+               herbName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+               farmerAddress.toLowerCase().includes(searchTerm.toLowerCase());
+      });
     }
 
     // Filter by status
     if (statusFilter !== 'All') {
-      filtered = filtered.filter(batch => batch.status === statusFilter);
+      filtered = filtered.filter(batch => {
+        const status = batch.status || 'Pending';
+        return status === statusFilter;
+      });
     }
 
     // Filter by herb
     if (herbFilter !== 'All') {
-      filtered = filtered.filter(batch => batch.herb === herbFilter);
+      filtered = filtered.filter(batch => {
+        const herbName = batch.herbName || batch.herb;
+        return herbName === herbFilter;
+      });
     }
 
     setFilteredBatches(filtered);
@@ -73,24 +143,59 @@ const ManufacturerDashboard = () => {
     setActionLoading(true);
     
     try {
-      const processingNotes = `Processed by ${user.name} on ${new Date().toLocaleDateString()}`;
-      const updatedBatch = await markAsProcessed(batchId, processingNotes, user.name);
+      console.log(`🏭 Processing batch ${batchId}...`);
       
-      // Update local state
-      setBatches(prev => prev.map(batch => 
-        batch.id === batchId ? updatedBatch : batch
-      ));
+      let result;
       
-      showSuccess(`Batch ${batchId} marked as processed`);
-      
-      // Show QR code modal
-      setQrModal({
-        isOpen: true,
-        batch: updatedBatch
-      });
+      if (isConnected && service) {
+        // Generate QR code hash for the batch
+        const qrCodeHash = `QR-${batchId}-${Date.now()}`;
+        
+        // Use blockchain service
+        result = await service.processBatch(parseInt(batchId), qrCodeHash);
+        console.log('📥 Process result:', result);
+        
+        if (result.success) {
+          showSuccess(`Batch ${batchId} processed successfully on blockchain`);
+          
+          // Reload batches to get updated data
+          console.log('🔄 Reloading batches after processing...');
+          await loadBatches();
+          
+          // Get the updated batch for QR modal
+          const updatedBatchResult = await service.getBatch(parseInt(batchId));
+          if (updatedBatchResult.success) {
+            // Show QR code modal
+            setQrModal({
+              isOpen: true,
+              batch: updatedBatchResult.data
+            });
+          }
+        } else {
+          throw new Error(result.error);
+        }
+      } else {
+        // Fallback to local storage
+        const processingNotes = `Processed by ${user.name} on ${new Date().toLocaleDateString()}`;
+        const updatedBatch = await markAsProcessed(batchId, processingNotes, user.name);
+        
+        // Update local state
+        setBatches(prev => prev.map(batch => 
+          batch.id === batchId ? updatedBatch : batch
+        ));
+        
+        showSuccess(`Batch ${batchId} marked as processed`);
+        
+        // Show QR code modal
+        setQrModal({
+          isOpen: true,
+          batch: updatedBatch
+        });
+      }
       
     } catch (error) {
-      showError('Failed to mark batch as processed');
+      console.error(`❌ Failed to process batch:`, error);
+      showError(`Failed to process batch: ${error.message}`);
     } finally {
       setActionLoading(false);
     }
@@ -101,14 +206,14 @@ const ManufacturerDashboard = () => {
   };
 
   // Get unique herbs for filter
-  const uniqueHerbs = [...new Set(batches.map(batch => batch.herb))];
+  const uniqueHerbs = [...new Set(batches.map(batch => batch.herbName || batch.herb).filter(Boolean))];
   
   // Calculate stats
   const stats = {
     total: batches.length,
-    approved: batches.filter(b => b.status === 'Approved').length,
-    processed: batches.filter(b => b.status === 'Processed').length,
-    pending: batches.filter(b => b.status === 'Pending').length
+    approved: batches.filter(b => (b.status || 'Pending') === 'Approved').length,
+    processed: batches.filter(b => (b.status || 'Pending') === 'Processed').length,
+    pending: batches.filter(b => (b.status || 'Pending') === 'Pending').length
   };
 
   if (loading) {
@@ -122,13 +227,23 @@ const ManufacturerDashboard = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900 flex items-center">
-          Welcome, Manufacturer <span className="ml-2">🏭</span>
-        </h1>
-        <p className="mt-2 text-gray-600">
-          Process approved herb batches and generate QR codes for traceability
-        </p>
+      <div className="flex justify-between items-start">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center">
+            Welcome, Manufacturer <span className="ml-2">🏭</span>
+          </h1>
+          <p className="mt-2 text-gray-600">
+            Process approved herb batches and generate QR codes for traceability
+            {isConnected && <span className="text-green-600"> • Connected to Blockchain</span>}
+          </p>
+        </div>
+        <button
+          onClick={loadBatches}
+          disabled={loading}
+          className="btn-secondary flex items-center"
+        >
+          🔄 Refresh Data
+        </button>
       </div>
 
       {/* Stats */}
